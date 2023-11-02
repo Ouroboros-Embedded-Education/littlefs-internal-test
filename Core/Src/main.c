@@ -21,7 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stm32f1xx_hal_flash.h>
+#include <stm32f1xx_hal_flash_ex.h>
 
+#include "lfs.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +34,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+typedef struct{
+	uint32_t secCount;
+	uint32_t bootCount;
+}app_count_t;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -42,7 +48,10 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+lfs_t Lfs;
+struct lfs_config LfsConfig;
 
+app_count_t Counter = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -55,6 +64,100 @@ static void MX_GPIO_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+// Read a region in a block. Negative error codes are propagated
+// to the user.
+int _flash_read(const struct lfs_config *c, lfs_block_t block,
+        lfs_off_t off, void *buffer, lfs_size_t size){
+
+	uint32_t StartAddress, i;
+	uint32_t *Bff;
+
+	StartAddress = 0x0800D800 + (block*c->block_size) + off;
+
+	Bff = (uint32_t*)buffer;
+	for (i=0 ; i<(size/4) ; i++){
+		*Bff = *(__IO uint32_t*)StartAddress;
+		StartAddress += 4;
+		Bff++;
+	}
+
+	return LFS_ERR_OK;
+}
+
+// Program a region in a block. The block must have previously
+// been erased. Negative error codes are propagated to the user.
+// May return LFS_ERR_CORRUPT if the block should be considered bad.
+int _flash_prog(const struct lfs_config *c, lfs_block_t block,
+        lfs_off_t off, const void *buffer, lfs_size_t size){
+	uint32_t StartAddress, i;
+	uint32_t *Bff;
+
+	StartAddress = 0x0800D800 + (block*c->block_size) + off;
+	Bff = (uint32_t*)buffer;
+
+	HAL_FLASH_Unlock();
+	for (i=0 ; i<(size/4) ; i++){
+		HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, StartAddress, (uint64_t)(*Bff));
+		StartAddress += 4;
+		Bff++;
+	}
+	HAL_FLASH_Lock();
+
+	return LFS_ERR_OK;
+}
+
+// Erase a block. A block must be erased before being programmed.
+// The state of an erased block is undefined. Negative error codes
+// are propagated to the user.
+// May return LFS_ERR_CORRUPT if the block should be considered bad.
+int _flash_erase(const struct lfs_config *c, lfs_block_t block){
+	uint32_t StartAddress;
+	uint32_t PageErr;
+	FLASH_EraseInitTypeDef EraseInitStruct;
+
+	StartAddress = 0x0800D800 + (block*c->block_size);
+	EraseInitStruct.TypeErase = FLASH_TYPEERASE_PAGES;
+	EraseInitStruct.PageAddress = StartAddress;
+	EraseInitStruct.NbPages = 1;
+	EraseInitStruct.Banks = FLASH_BANK_1;
+	HAL_FLASH_Unlock();
+	HAL_FLASHEx_Erase(&EraseInitStruct, &PageErr);
+	HAL_FLASH_Lock();
+
+	return LFS_ERR_OK;
+}
+
+// Sync the state of the underlying block device. Negative error codes
+// are propagated to the user.
+int _flash_sync(const struct lfs_config *c){
+	return LFS_ERR_OK;
+}
+
+void __init_storage(){
+	int32_t error;
+
+	LfsConfig.read_size = 64;
+	LfsConfig.prog_size = 64;
+	LfsConfig.block_size = 1024;
+	LfsConfig.block_count = 10;
+	LfsConfig.cache_size = 256;
+	LfsConfig.lookahead_size = 8;
+	LfsConfig.block_cycles = 1000;
+
+	LfsConfig.read = _flash_read;
+	LfsConfig.prog = _flash_prog;
+	LfsConfig.erase = _flash_erase;
+	LfsConfig.sync = _flash_sync;
+
+	error = lfs_mount(&Lfs, &LfsConfig);
+	if (error != LFS_ERR_OK){
+		lfs_format(&Lfs, &LfsConfig);
+		error = lfs_mount(&Lfs, &LfsConfig);
+		if (error != LFS_ERR_OK){
+			Error_Handler();
+		}
+	}
+}
 /* USER CODE END 0 */
 
 /**
@@ -64,7 +167,8 @@ static void MX_GPIO_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+	uint32_t HalTickAux;
+	lfs_file_t File;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -86,13 +190,29 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
+  HAL_Delay(100);
+  __init_storage();
 
+  lfs_file_open(&Lfs, &File, "count.bin", LFS_O_RDONLY | LFS_O_CREAT);
+  lfs_file_read(&Lfs, &File, &Counter, sizeof(app_count_t));
+  lfs_file_close(&Lfs, &File);
+
+  Counter.bootCount += 1;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  HalTickAux = HAL_GetTick();
+
+	  lfs_file_open(&Lfs, &File, "count.bin", LFS_O_RDWR | LFS_O_CREAT);
+	  lfs_file_write(&Lfs, &File, &Counter, sizeof(app_count_t));
+	  lfs_file_close(&Lfs, &File);
+
+	  while ((HAL_GetTick() - HalTickAux) < 1000);
+
+	  Counter.secCount += 1;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
